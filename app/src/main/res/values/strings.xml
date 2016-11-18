@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Droid Location App</string>
+    <string name="edit_message">Polling interval in sec</string>
+    <string name="button_set">Set</string>
+    <string name="display_message"></string>
+    <string name="title_activity_maps">Map</string>
+</resources>
