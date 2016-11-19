@@ -1,6 +1,7 @@
 package com.shajoshi.sjapp;
 
 import android.content.Intent;
+import java.text.SimpleDateFormat;
 import android.location.Address;
 import android.location.Geocoder;
 import android.location.Location;
@@ -18,6 +19,8 @@ import com.google.android.gms.maps.SupportMapFragment;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.MarkerOptions;
 
+import java.sql.Time;
+import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
@@ -26,7 +29,7 @@ public class MainActivity extends FragmentActivity implements OnMapReadyCallback
     public final static String EXTRA_MESSAGE = "com.shajoshi.sjapp.MESSAGE";
     public final static String LOC_MESSAGE = "com.shajoshi.sjapp.LOCATION";
     public final static String tag = "MainActivity";
-    public static Location currentLocation = null;
+    //public static Location currentLocation = null;
     private GoogleMap mMap = null;
 
     @Override
@@ -37,6 +40,7 @@ public class MainActivity extends FragmentActivity implements OnMapReadyCallback
         //Spawn the location updater service
         Intent serviceIntent = new Intent(this, LocationUpdaterService.class);
         startService(serviceIntent);
+
 
         // Init Map
         SupportMapFragment mapFragment = (SupportMapFragment) getSupportFragmentManager()
@@ -55,85 +59,28 @@ public class MainActivity extends FragmentActivity implements OnMapReadyCallback
         if (val.trim().length() == 0)
             return;
 
-        int delay = LocationUpdaterService.POLL_DELAY; //set to last correct value
-        //Convert to seconds for delay
         try
         {
-            Log.d(tag, "Old DELAY = " + LocationUpdaterService.POLL_DELAY);
-            delay = Integer.parseInt(val) * 1000;
-            LocationUpdaterService.POLL_DELAY = delay;
-            Log.d(tag, "New DELAY = " + LocationUpdaterService.POLL_DELAY);
+            int delay = Integer.parseInt(val);
+            delay = LocationUpdaterService.setDelay(delay);
+            editText.setText(new Integer(delay).toString());
         }
         catch(Throwable t)
         {
-            Log.e(tag, "Not an integer: " + val, t);
+            Log.e(tag, "Exception in setPollInterval()", t);
         }
-        //editText.setText(delay/1000);
     }
 
     public void refreshLocation(View view)
     {
         TextView dispText = (TextView) findViewById(R.id.display_message);
-        String message = getLocation();
+        String message = LocationUpdaterService.getLocationText();
         dispText.setText(message);
         Log.d(tag, "refreshLocation() = " + message);
         setPollInterval();
     }
 
-    public String getLocation()
-    {
-        if(currentLocation == null)
-        {
-            return "Location not found..";
-        }
-        StringBuffer buf = new StringBuffer(256);
-        buf.append("Latitude: ").append(currentLocation.getLatitude());
-        buf.append("\n");
-        buf.append("Longitude: ").append(currentLocation.getLongitude());
-        buf.append("\n");
 
-        if(currentLocation.hasAccuracy())
-        {
-            buf.append("Accuracy: ").append(currentLocation.getAccuracy()).append(" m\n");
-        }
-        if(currentLocation.hasSpeed())
-        {
-            buf.append("Speed: ").append(currentLocation.getSpeed()).append(" m/s\n");
-        }
-        if(currentLocation.hasAltitude())
-        {
-            buf.append("Altitude: ").append(currentLocation.getAltitude()).append(" m\n");
-        }
-        buf.append("Location Provider: ").append(currentLocation.getProvider()).append("\n");
-
-        buf.append(getGeocodeDetails(currentLocation));
-
-        if(buf.length() > 256)
-            buf.setLength(256);
-
-        return buf.toString();
-    }
-
-    public String getGeocodeDetails(Location loc)
-    {
-        StringBuffer addr = new StringBuffer(256);
-        Geocoder gcd = new Geocoder(getBaseContext(), Locale.getDefault());
-        List<Address> addresses;
-        try
-        {
-            addresses = gcd.getFromLocation(loc.getLatitude(),
-                    loc.getLongitude(), 1);
-            for(int i = 0; i < addresses.size(); ++i)
-            {
-                addr.append(addresses.get(i).toString()).append("\n");
-            }
-        }
-        catch (Exception e)
-        {
-            Log.getStackTraceString(e);
-        }
-        return addr.toString();
-    }
 
     public void onStart()
     {
@@ -183,12 +130,14 @@ public class MainActivity extends FragmentActivity implements OnMapReadyCallback
         mMap = googleMap;
         mMap.setMyLocationEnabled(true);
 
-        Location loc = MainActivity.currentLocation;
-        if(loc != null) {
+        Location loc = LocationUpdaterService.getLocation();
+        if(loc != null)
+        {
             // Add a marker in Sydney and move the camera
             LatLng current = new LatLng(loc.getLatitude(), loc.getLongitude());
             mMap.addMarker(new MarkerOptions().position(current).title("Current"));
             mMap.moveCamera(CameraUpdateFactory.newLatLng(current));
+            this.refreshLocation(null);
         }
     }
 
