@@ -1,44 +1,62 @@
 package com.shajoshi.sjapp;
 
 import android.Manifest;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.location.Address;
-import android.location.Geocoder;
 import android.location.Location;
-import android.location.LocationManager;
+import android.net.Uri; 
+import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
+import android.os.Environment; 
 import android.os.Handler;
 import android.os.IBinder;
-import android.support.annotation.Nullable;
-import android.support.v4.content.ContextCompat;
-import android.location.LocationListener;
+import android.os.Looper;
+import android.provider.MediaStore; 
+import androidx.annotation.Nullable;
+import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
 import android.util.Log;
 
-import java.io.File;
-import java.io.FileOutputStream;
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.LocationCallback;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationResult;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.Priority;
+
+import java.io.OutputStream; 
+import java.io.IOException; 
 import java.text.SimpleDateFormat;
 import java.util.Date;
-import java.util.List;
 import java.util.Locale;
-
-/** Sample Code from http://codereview.stackexchange.com/questions/123933/android-studio-background-service-to-update-location
- *
- */
 
 public class LocationUpdaterService extends Service
 {
     public static final String tag = "LocationUpdaterService";
-    private static int POLL_INTERVAL = 12000; // 12 seconds by default
-    public static Boolean isRunning = false;
+    // Changed to package-private for testability
+    static long POLL_INTERVAL = 12000; 
+    public static Boolean isRunning = false; 
 
-    public LocationManager mLocationManager;
-    public LocationUpdaterListener mLocationListener;
     private static Location previousBestLocation = null;
 
+    private static final String CHANNEL_ID = "LocationServiceChannel";
+    private static final int NOTIFICATION_ID = 1;
+
+    private FusedLocationProviderClient fusedLocationClient;
+    private LocationCallback locationCallback;
+    private LocationRequest locationRequest;
+
+    // Lazy initialization for Handler and Runnable
+    private Handler mHandler = null;
+    private Runnable mHandlerTask = null;
 
     @Nullable
     @Override
@@ -50,32 +68,107 @@ public class LocationUpdaterService extends Service
     @Override
     public void onCreate()
     {
-        Log.d(tag, "Start onCreate()");
-        mLocationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
-        mLocationListener = new LocationUpdaterListener();
         super.onCreate();
+        Log.d(tag, "Start onCreate()");
+        createNotificationChannel();
+
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
+        createLocationRequest();
+        createLocationCallback();
+        
         Log.d(tag, "End onCreate()");
     }
 
-    Handler mHandler = new Handler();
-    Runnable mHandlerTask = new Runnable()
-    {
-        @Override
-        public void run()
-        {
-            if (!isRunning)
-            {
-                startListening();
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel serviceChannel = new NotificationChannel(
+                    CHANNEL_ID,
+                    "Location Service Channel",
+                    NotificationManager.IMPORTANCE_DEFAULT
+            );
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) {
+                manager.createNotificationChannel(serviceChannel);
             }
-            mHandler.postDelayed(mHandlerTask, POLL_INTERVAL);
         }
-    };
+    }
+
+    private Notification buildNotification() {
+        Intent notificationIntent = new Intent(this, MainActivity.class);
+        PendingIntent pendingIntent = PendingIntent.getActivity(this,
+                0, notificationIntent, PendingIntent.FLAG_IMMUTABLE);
+
+        return new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("Location Service")
+                .setContentText("Tracking your location in the background")
+                .setSmallIcon(R.mipmap.ic_launcher) 
+                .setContentIntent(pendingIntent)
+                .build();
+    }
+    
+    private void createLocationRequest() {
+        locationRequest = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, POLL_INTERVAL)
+            .setMinUpdateIntervalMillis(POLL_INTERVAL / 2)
+            .build();
+    }
+
+    private void createLocationCallback() {
+        locationCallback = new LocationCallback() {
+            @Override
+            public void onLocationResult(LocationResult locationResult) {
+                if (locationResult == null) {
+                    return;
+                }
+                for (Location location : locationResult.getLocations()) {
+                    if (location != null) {
+                        Log.d(tag, "New location received: " + location.getLatitude() + ", " + location.getLongitude());
+                        if (isBetterLocation(location, previousBestLocation)) {
+                            previousBestLocation = location;
+                            String text = getLocationText(); 
+                            Log.i(tag, "New Best Location (Fused): " + text);
+                            writeToFileStream(text.getBytes());
+                            stopListening(); 
+                        }
+                    }
+                }
+            }
+        };
+    }
+    
+    private void ensureHandlerInitialized() {
+        if (mHandler == null) {
+            // Check if Looper has been prepared for this thread, common issue in tests
+            if (Looper.myLooper() == null) {
+                Looper.prepare(); // Prepare looper for the current thread if not already prepared
+                                  // This is a common workaround for tests, but consider implications.
+                                  // For a service, Handler should ideally be on MainLooper or a dedicated HandlerThread.
+                                  // The previous code used Looper.getMainLooper(), which is better.
+            }
+            mHandler = new Handler(Looper.getMainLooper()); // Reverted to ensure it uses MainLooper
+            mHandlerTask = new Runnable() {
+                @Override
+                public void run() {
+                    if (!isRunning) {
+                        startListening();
+                    }
+                    if (mHandler != null) { // Check mHandler again as it could be cleared in onDestroy
+                        mHandler.postDelayed(this, POLL_INTERVAL);
+                    }
+                }
+            };
+        }
+    }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId)
     {
         Log.d(tag, "Start onStartCommand()");
-        mHandlerTask.run();
+        ensureHandlerInitialized(); // Initialize Handler here
+        startForeground(NOTIFICATION_ID, buildNotification());
+        if (mHandler != null && mHandlerTask != null) { // Null check for safety
+            mHandler.removeCallbacks(mHandlerTask); // Remove existing callbacks before posting new one
+            mHandler.post(mHandlerTask); 
+        }
         Log.d(tag, "End onStartCommand()");
         return START_STICKY;
     }
@@ -83,280 +176,138 @@ public class LocationUpdaterService extends Service
     @Override
     public void onDestroy() {
         Log.d(tag, "Start onDestroy()");
-        stopListening();
-        mHandler.removeCallbacks(mHandlerTask);
-        try
-        {
-            if (fos != null)
-                fos.close();
-        }
-        catch(Exception e)
-        {
-            e.printStackTrace();
+        stopListening(); 
+        if (mHandler != null && mHandlerTask != null) { // Null check
+            mHandler.removeCallbacks(mHandlerTask); 
+            mHandler = null; // Release handler
+            mHandlerTask = null;
         }
         super.onDestroy();
         Log.d(tag, "End onDestroy()");
     }
 
     private void startListening() {
-        Log.d(tag, "Start startListening()");
+        Log.d(tag, "Attempting to start listening for location updates.");
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-                == PackageManager.PERMISSION_GRANTED
-                || ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
-                PackageManager.PERMISSION_GRANTED)
+                == PackageManager.PERMISSION_GRANTED)
         {
-            if (mLocationManager.getAllProviders().contains(LocationManager.GPS_PROVIDER))
-            {
-                Log.d(tag, "Using GPS_PROVIDER for location");
-                mLocationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, 5, mLocationListener);
-            }
-            if (mLocationManager.getAllProviders().contains(LocationManager.NETWORK_PROVIDER))
-            {
-                Log.d(tag, "Using NETWORK_PROVIDER for location");
-                mLocationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000, 5, mLocationListener);
+            try {
+                createLocationRequest(); // Ensure locationRequest is up-to-date with POLL_INTERVAL
+                fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper());
+                isRunning = true; 
+                Log.d(tag, "Requested location updates via FusedLocationProviderClient.");
+            } catch (SecurityException e) {
+                Log.e(tag, "SecurityException while requesting location updates: " + e.getMessage());
+                isRunning = false; 
             }
         }
         else
         {
-            Log.i(tag, "App does not have permissions to access device location");
+            Log.i(tag, "ACCESS_FINE_LOCATION permission not granted. Cannot start listening.");
+            isRunning = false; 
         }
-        isRunning = true;
-        Log.d(tag, "End startListening()");
     }
 
     private void stopListening()
     {
-        Log.d(tag, "Start stopListening()");
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-                == PackageManager.PERMISSION_GRANTED
-                || ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
-                == PackageManager.PERMISSION_GRANTED)
-        {
-            mLocationManager.removeUpdates(mLocationListener);
+        Log.d(tag, "Attempting to stop listening for location updates.");
+        if (fusedLocationClient != null && locationCallback != null) {
+            fusedLocationClient.removeLocationUpdates(locationCallback);
+            isRunning = false; 
+            Log.d(tag, "Stopped location updates from FusedLocationProviderClient.");
         }
-        isRunning = false;
-        Log.d(tag, "End stopListening()");
-    }
-
-    public class LocationUpdaterListener implements LocationListener
-    {
-        @Override
-        public void onLocationChanged(Location location) {
-            Log.d(tag, "Start LocationUpdaterListener.onLocationChanged()");
-            if (isBetterLocation(location, previousBestLocation))
-            {
-                try
-                {
-                    // Script to post location data to server
-                    previousBestLocation = location;
-                    //Write it to file
-                    String text = getLocationText();
-                    Log.i(tag, "Detected New Location: " + text);
-                    writeToFileStream(text.getBytes());
-                }
-                catch (Exception e)
-                {
-                    e.printStackTrace();
-                }
-                finally
-                {
-                    stopListening();
-                }
-            }
-            Log.d(tag, "End LocationUpdaterListener.onLocationChanged()");
-        }
-
-        @Override
-        public void onProviderDisabled(String provider) {
-            stopListening();
-        }
-
-        @Override
-        public void onProviderEnabled(String provider) { }
-
-        @Override
-        public void onStatusChanged(String provider, int status, Bundle extras) { }
     }
 
     protected boolean isBetterLocation(Location location, Location currentBestLocation) {
-        if (currentBestLocation == null)
-        {
-            // A new location is always better than no location
-            return true;
-        }
-
-        // Check whether the new location fix is newer or older
+        if (currentBestLocation == null) { return true; }
         long timeDelta = location.getTime() - currentBestLocation.getTime();
-        boolean isSignificantlyNewer = timeDelta > POLL_INTERVAL;
+        boolean isSignificantlyNewer = timeDelta > POLL_INTERVAL; 
         boolean isSignificantlyOlder = timeDelta < -POLL_INTERVAL;
         boolean isNewer = timeDelta > 0;
-
-        // If it's been more than two minutes since the current location, use the new location
-        // because the user has likely moved
-        if (isSignificantlyNewer)
-        {
-            return true;
-            // If the new location is more than two minutes older, it must be worse
-        } else if (isSignificantlyOlder)
-        {
-            return false;
-        }
-
-        // Check whether the new location fix is more or less accurate
+        if (isSignificantlyNewer) { return true; } 
+        else if (isSignificantlyOlder) { return false; }
         int accuracyDelta = (int) (location.getAccuracy() - currentBestLocation.getAccuracy());
         boolean isLessAccurate = accuracyDelta > 0;
         boolean isMoreAccurate = accuracyDelta < 0;
         boolean isSignificantlyLessAccurate = accuracyDelta > 200;
-
-        // Check if the old and new location are from the same provider
         boolean isFromSameProvider = isSameProvider(location.getProvider(), currentBestLocation.getProvider());
-
-        // Determine location quality using a combination of timeliness and accuracy
-        if (isMoreAccurate) {
-            return true;
-        } else if (isNewer && !isLessAccurate) {
-            return true;
-        } else if (isNewer && !isSignificantlyLessAccurate && isFromSameProvider) {
-            return true;
-        }
+        if (isMoreAccurate) { return true; } 
+        else if (isNewer && !isLessAccurate) { return true; } 
+        else if (isNewer && !isSignificantlyLessAccurate && isFromSameProvider) { return true; }
         return false;
     }
 
-    /** Checks whether two providers are the same */
     private boolean isSameProvider(String provider1, String provider2) {
-        if (provider1 == null) {
-            return provider2 == null;
-        }
+        if (provider1 == null) { return provider2 == null; }
         return provider1.equals(provider2);
     }
-
-
-    /** Public method to set delay between location checks
-     *  Validate that delay between 1 sec and 120 sec only
-     *  @return the actual delay set by this method
-     */
-
-    public static int setDelay(int sec)
-    {
-        if(sec <= 0)
-            sec = 1;
-
-        if(sec >=120)
-            sec = 120;
-
-        POLL_INTERVAL = sec * 1000; //convert to millisecond
+    
+    public static int setDelay(int sec) {
+        if(sec <= 0) sec = 1;
+        if(sec >=120) sec = 120;
+        POLL_INTERVAL = sec * 1000;
         Log.i(tag, "POLL_INTERVAL set to \"" + sec + "\" sec");
         return sec;
     }
 
-    public static Location getLocation()
-    {
+    public static Location getLocation() {
         return previousBestLocation;
     }
 
-    //Name of file to store the locations
-    private final String saveFileName = "sjapp.txt";
-    private File f = null;
-    private FileOutputStream fos = null;
+    private final String saveFileName = "sjapp.txt"; 
 
-    void writeToFileStream(byte[] line)
-    {
-        //check if file exists or create it
-        try
-        {
-            if(f == null)
-            {
-                f = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), saveFileName);
-            }
-            if (f.exists())
-            {
-                StringBuffer buf = new StringBuffer(128).append("File ").
-                        append(saveFileName).append(" already exists at ").
-                        append(f.getAbsolutePath());
-                Log.d(tag, buf.toString());
-            }
+    void writeToFileStream(byte[] line) {
+        ContentResolver resolver = getContentResolver();
+        ContentValues contentValues = new ContentValues();
+        contentValues.put(MediaStore.MediaColumns.DISPLAY_NAME, saveFileName);
+        contentValues.put(MediaStore.MediaColumns.MIME_TYPE, "text/plain");
 
-            if((fos == null) || !(fos.getFD().valid()))
-            {
-                fos = new FileOutputStream(f, true);  //open for append
-            }
-            fos.write(line);
-            Log.d(tag, "Writing to file " + f.getAbsolutePath());
-            fos.flush();
+        Uri collectionUri;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            contentValues.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+            collectionUri = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+        } else {
+            String downloadsPath = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).toString();
+            contentValues.put(MediaStore.MediaColumns.DATA, downloadsPath + "/" + saveFileName);
+            collectionUri = MediaStore.Files.getContentUri("external");
         }
-        catch(Exception e)
-        {
-            Log.e(tag, "Error getting File " + saveFileName, e);
+        
+        Uri uri = null;
+        try {
+            uri = resolver.insert(collectionUri, contentValues);
+            if (uri == null) {
+                Log.e(tag, "Failed to create new MediaStore record.");
+                return;
+            }
+            try (OutputStream fos = resolver.openOutputStream(uri)) {
+                if (fos != null) {
+                    fos.write(line);
+                    fos.write("\n".getBytes()); 
+                    Log.d(tag, "Writing to MediaStore URI: " + uri.toString());
+                } else {
+                     Log.e(tag, "Failed to open output stream for MediaStore URI: " + uri.toString());
+                }
+            }
+        } catch (Exception e) { 
+            Log.e(tag, "Error writing to MediaStore. URI: " + (uri != null ? uri.toString() : "null (insert failed)"), e);
         }
     }
 
-    public static String getLocationText()
-    {
+    public static String getLocationText() {
         Location loc = previousBestLocation;
-        if(loc == null)
-        {
-            return "Location not found..";
-        }
-
+        if(loc == null) { return "Location not found.."; }
         StringBuffer buf = new StringBuffer(256);
         long t = loc.getTime();
-        // New date object from millis
         Date date = new Date(t);
-        // formattter
-        SimpleDateFormat df = new SimpleDateFormat("dd-MMM-YYYY HH:mm:ss");
-        // Pass date object
+        SimpleDateFormat df = new SimpleDateFormat("dd-MMM-YYYY HH:mm:ss", Locale.getDefault());
         String formatted = df.format(date);
-
         buf.append("Time: ").append(formatted).append("\n");
-        buf.append("Location Provider: ").append(loc.getProvider()).append("\n");
-        buf.append("Latitude: ").append(loc.getLatitude());
-        buf.append("\n");
-        buf.append("Longitude: ").append(loc.getLongitude());
-        buf.append("\n");
-
-        if(loc.hasAccuracy())
-        {
-            buf.append("Accuracy: ").append(loc.getAccuracy()).append(" m\n");
-        }
-        if(loc.hasSpeed())
-        {
-            buf.append("Speed: ").append(loc.getSpeed()).append(" m/s\n");
-        }
-        if(loc.hasAltitude())
-        {
-            buf.append("Altitude: ").append(loc.getAltitude()).append(" m\n");
-        }
-
-        //buf.append(getGeocodeDetails(loc));
-        /**
-        if(buf.length() > 256)
-            buf.setLength(256);
-        */
+        buf.append("Location Provider: ").append(loc.getProvider()).append("\n"); 
+        buf.append("Latitude: ").append(loc.getLatitude()).append("\n");
+        buf.append("Longitude: ").append(loc.getLongitude()).append("\n");
+        if(loc.hasAccuracy()) { buf.append("Accuracy: ").append(loc.getAccuracy()).append(" m\n"); }
+        if(loc.hasSpeed()) { buf.append("Speed: ").append(loc.getSpeed()).append(" m/s\n"); }
+        if(loc.hasAltitude()) { buf.append("Altitude: ").append(loc.getAltitude()).append(" m\n"); }
         return buf.toString();
     }
-    /**
-    private String getGeocodeDetails(Location loc)
-    {
-        StringBuffer addr = new StringBuffer(256);
-
-        Geocoder gcd = new Geocoder(getBaseContext(), Locale.getDefault());
-        List<Address> addresses;
-        try
-        {
-            addresses = gcd.getFromLocation(loc.getLatitude(),
-                    loc.getLongitude(), 1);
-            for(int i = 0; i < addresses.size(); ++i)
-            {
-                addr.append(addresses.get(i).toString()).append("\n");
-            }
-        }
-        catch (Exception e)
-        {
-            Log.getStackTraceString(e);
-        }
-        return addr.toString();
-    }
-     */
-
-
 }
